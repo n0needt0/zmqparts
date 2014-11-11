@@ -1,0 +1,71 @@
+		//unmarshall
+
+		err = json.Unmarshal(raw, &msg)
+
+		debug("parced: %v", msg)
+
+		if err != nil {
+			log.Printf("can not decode json %s : %v", raw, err)
+			socket.Send(blank, 0)
+			continue
+		}
+
+		node := strings.ToLower(msg.Node)
+		if node == "" {
+			log.Printf("empty node %v", raw)
+			socket.Send(blank, 0)
+			continue
+		}
+
+		ip := strings.ToLower(msg.Ip)
+		if ip == "" {
+			log.Printf("empty ip %v", raw)
+			socket.Send(blank, 0)
+			continue
+		}
+
+		ttl := strings.ToLower(msg.Ttl)
+		if ttl == "" {
+			log.Printf("Empty Ttl %v", raw)
+			socket.Send(blank, 0)
+			continue
+		}
+
+		//check if node is allowed
+		if _, ok := validlocs[node]; !ok {
+			log.Printf("Invalid location %v", node)
+			socket.Send(blank, 0)
+			continue
+		}
+
+		//verify ip
+		addr := net.ParseIP(ip)
+		if addr == nil || addr.To4() == nil {
+			log.Printf("Invalid ip %v", ip)
+			socket.Send(blank, 0)
+			continue
+		}
+
+		//set ttl
+		ttlint, err := strconv.Atoi(ttl)
+		if err != nil {
+			log.Printf("Invalid ttl %v", ttl)
+			//try on from
+			ttlint, err = strconv.Atoi(ttlsec)
+			if err != nil {
+				log.Printf("Invalid default ttl %v", ttlsec)
+				socket.Send(blank, 0)
+				continue
+			}
+		}
+
+		master, err := MasterList.GetSetMaster(node, addr, ttlint)
+		if err != nil {
+			log.Printf("MasterList Err %v : %v", master, err)
+			socket.Send(blank, 0)
+			continue
+		}
+		socket.Send([]byte(master), 0)
+	}
+
+//real work
