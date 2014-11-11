@@ -9,6 +9,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	zmq "github.com/alecthomas/gozmq"
@@ -67,9 +68,55 @@ var HA = struct {
 	sync.RWMutex{},
 }
 
-type Processor interface {
-	PreProc() bool
-	PostProc() bool
+//*****Processor helper functions
+
+var GetRequest = func(sequence int) ([]byte, error) {
+	var msg = struct {
+		SERIAL int
+		TS     int64
+		LOAD   map[string]interface{}
+	}{
+		SERIAL: sequence,
+		TS:     time.Now().Unix(),
+		LOAD:   make(map[string]interface{}),
+	}
+
+	//TODO this is where you set payload
+
+	msg.LOAD["el"] = "goes here"
+
+	jsonstr, err := json.Marshal(msg)
+	if err != nil {
+		return []byte(""), err
+
+	}
+
+	return jsonstr, nil
+}
+
+var GetReply = func(JsonMsg []byte) (int, error) {
+	var msg = struct {
+		SERIAL int
+		TS     int64
+		LOAD   map[string]interface{}
+	}{
+		SERIAL: 0,
+		TS:     0,
+		LOAD:   make(map[string]interface{}),
+	}
+
+	err := json.Unmarshal(JsonMsg, &msg)
+	if err != nil {
+		return 0, err
+	}
+
+	msgerr, ok := msg.LOAD["error"]
+	if ok {
+		errstr, _ := msgerr.(string)
+		return msg.SERIAL, errors.New(errstr)
+	}
+
+	return msg.SERIAL, nil
 }
 
 //parse command line
@@ -279,12 +326,21 @@ func client() {
 			retriesLeft = 10
 		}
 
-		if sequence > 1000 {
-			sequence = 1 //rewind to prevent overflow
+		if sequence > 100000 {
+			sequence = 1 //rewind to prevent overflow, highwater mark is set at 1000 by default
 		}
 
-		debug("ASK (%d)\n", sequence)
-		client.Send([]byte(strconv.Itoa(sequence)), 0)
+		//GET data for request
+		data, err := GetRequest(sequence)
+		if err != nil {
+			log.Printf("Error on GetLoad %s", err)
+			continue
+		}
+		//TODO
+		//fmt.Sprintf("REQ (%s)", data)
+		//debug("ASK (%d)\n", sequence)
+		//client.Send([]byte(strconv.Itoa(sequence)), 0)
+		client.Send(data, 0)
 
 		for expectReply := true; expectReply; {
 			//  Poll socket for a reply, with timeout
@@ -310,8 +366,15 @@ func client() {
 					continue
 				}
 
-				if replyInt, err := strconv.Atoi(string(reply)); replyInt == sequence && err == nil {
-					debug("OK (%s)\n", reply)
+				debug("%s", reply)
+				//unpack reply  here
+				replySequence, err := GetReply(reply)
+				if err != nil {
+					log.Printf("reply err %s", err)
+				}
+
+				if replySequence == sequence {
+					debug("OK seq:%d rep:%d", sequence, replySequence)
 					retriesLeft = NumofRetries
 					GStats.Lock()
 					GStats.ConsecutiveDead = 0
@@ -319,7 +382,8 @@ func client() {
 					GStats.Unlock()
 					expectReply = false
 				} else {
-					log.Printf("E: Malformed reply from server: %s", reply)
+					log.Printf("Bad reply: %s", reply)
+
 				}
 			} else if retriesLeft--; retriesLeft == 0 {
 				log.Printf("Server offline, abandoning %s", HA.Servers[CurrentServerNum])
@@ -339,14 +403,17 @@ func client() {
 					retriesLeft = 10
 				}
 
-				if sequence > 1000 {
-					sequence = 1 //rewind to prevent overflow
+				if sequence > 100000 {
+					sequence = 1 //rewind to prevent overflow, highwater mark is set at 1000 by default
 				}
 
-				if CurrentServerNum > 100 {
-					CurrentServerNum = 0 //so we dont leak memory
+				if CurrentServerNum+1 >= len(HA.Servers) {
+					CurrentServerNum = 0
+				} else {
+					//try another one
+					CurrentServerNum++
 				}
-				CurrentServerNum = (CurrentServerNum + 1) % 2
+
 				GStats.Lock()
 				GStats.ConsecutiveDead++
 				GStats.Unlock()
@@ -366,9 +433,9 @@ func client() {
 					log.Fatal("can not connect worker", err)
 				}
 
-				log.Printf("Resending (%d)\n", sequence)
+				log.Printf("Resending (%s)\n", data)
 				//  Send request again, on new socket
-				client.Send([]byte(strconv.Itoa(sequence)), 0)
+				client.Send(data, 0)
 			}
 		}
 	}
